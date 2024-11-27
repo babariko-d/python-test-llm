@@ -1,0 +1,14 @@
+tags:
+  - Ask
+parameters:
+  - in: "query"
+    name: "question"
+    description: "Question text to issues"
+    required: true
+    schema:
+      type: "string"
+responses:
+  200:
+    description: "Response received"
+    schema:
+      type: "string"
