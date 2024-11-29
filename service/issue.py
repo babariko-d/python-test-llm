@@ -57,7 +57,7 @@ def ask_about_issue(question: str):
     )
 
     database_chain = prompt | llm | parser
-    sql_query: str = database_chain.invoke({"question": question})
+    sql_query = database_chain.invoke({"question": question})
     
     # Execute SQL query
     engine = create_engine(URL(
