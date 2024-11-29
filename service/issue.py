@@ -1,8 +1,10 @@
 from langchain_community.utilities import SQLDatabase
 from langchain_groq import ChatGroq
-from langchain.chains import create_sql_query_chain
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import PydanticOutputParser
 from snowflake.sqlalchemy import URL
 from sqlalchemy import create_engine
+from pydantic import BaseModel, Field
 import pandas as pd
 import os
 
@@ -13,19 +15,51 @@ SCHEMA = "PUBLIC"
 WAREHOUSE = "FIVETRAN_WAREHOUSE"
 ROLE = "ACCOUNTADMIN"
 
+PROMPT = """
+Given an input question, create a syntactically correct snowflake SQL query to run.
+Limit your query up to 50 rows.
+Use only column names from schema description. Pay attention to which column is in which table.
+Take into account field with components may contain text with comma separated words in different case.
+Also user can pass names for assignies and reporters partially.
+Query explanation is not needed and response should strictly follow the format instructions provided below.
+
+Only use the following tables:
+{table_info}
+
+Answer the user query.
+{format_instructions}
+{question}
+"""
+
+class QueryResponse(BaseModel):
+    query_text: str = Field(description="answer with text of SQL query")
+
 def ask_about_issue(question: str):
     password = os.environ.get('PASSWORD', '')
     snowflake_url = f"snowflake://{USERNAME}:{password}@{SNOWFLAKE_ACCOUNT}/{DATABASE}/{SCHEMA}?warehouse={WAREHOUSE}&role={ROLE}"
     
     db = SQLDatabase.from_uri(snowflake_url, sample_rows_in_table_info=1, include_tables=['issue'], view_support=True)
+    
+    ## Build LLM chain
     llm = ChatGroq(
         model="llama3-70b-8192",
         temperature=0,
         max_tokens=1000,
         max_retries=2
     )
-    database_chain = create_sql_query_chain(llm, db)
+
+    parser = PydanticOutputParser(pydantic_object=QueryResponse)
+
+    prompt = PromptTemplate(
+        template=PROMPT,
+        input_variables=["question"],
+        partial_variables={"format_instructions": parser.get_format_instructions(), "table_info": db.get_table_info()}
+    )
+
+    database_chain = prompt | llm | parser
     sql_query: str = database_chain.invoke({"question": question})
+    
+    # Execute SQL query
     engine = create_engine(URL(
         account=SNOWFLAKE_ACCOUNT,
         user=USERNAME,
@@ -37,17 +71,10 @@ def ask_about_issue(question: str):
     ))
     con = engine.connect()
     
-    query = None
-    QUERY_FIELD = "SQLQuery: "
-    for s in sql_query.split("\n"):
-        if s.startswith(QUERY_FIELD):
-            query = s.replace(QUERY_FIELD, "")
-            break
-
-    result = None
-    if query:
-        df = pd.read_sql(query, con)
-        result = df.to_string() if not df.empty else None
+    df = pd.read_sql(sql_query.query_text, con)
+    
+    
+    result = f"SQL query:\n{sql_query.query_text}\n\nQuery execution result:\n{df.to_string()}" if not df.empty else None
 
     if not result:
         print(sql_query)
